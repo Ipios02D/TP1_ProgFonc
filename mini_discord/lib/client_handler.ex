@@ -3,18 +3,7 @@ defmodule MiniDiscord.ClientHandler do
 
   def start(socket) do
     :gen_tcp.send(socket, "Bienvenue sur MiniDiscord!\r\n")
-    :gen_tcp.send(socket, "Entre ton pseudo : ")
-    {:ok, pseudo} = :gen_tcp.recv(socket, 0)
-    pseudo = String.trim(pseudo)
-
-    case :ets.lookup(:pseudos, pseudo) == [] do
-      true ->
-        reserver_pseudo(pseudo)
-      false ->
-        :gen_tcp.send(socket, "❌ Ce pseudo est déjà pris!\r\n")
-        :gen_tcp.close(socket)
-        :ok
-    end
+    pseudo = choisir_pseudo(socket)
 
     :gen_tcp.send(socket, "Salons disponibles : #{salons_dispo()}\r\n")
     :gen_tcp.send(socket, "Rejoins un salon (ex: general) : ")
@@ -22,6 +11,20 @@ defmodule MiniDiscord.ClientHandler do
     salon = String.trim(salon)
 
     rejoindre_salon(socket, pseudo, salon)
+  end
+
+  defp choisir_pseudo(socket) do
+    :gen_tcp.send(socket, "Entre ton pseudo : ")
+    {:ok, pseudo} = :gen_tcp.recv(socket, 0)
+    pseudo = String.trim(pseudo)
+
+    if pseudo_disponible?(pseudo) do
+      reserver_pseudo(pseudo)
+      pseudo
+    else
+      :gen_tcp.send(socket, "❌ Ce pseudo est déjà pris, essaie un autre.\r\n")
+      choisir_pseudo(socket)
+    end
   end
 
   defp rejoindre_salon(socket, pseudo, salon) do
@@ -50,8 +53,12 @@ defmodule MiniDiscord.ClientHandler do
     case :gen_tcp.recv(socket, 0, 100) do
       {:ok, msg} ->
         msg = String.trim(msg)
-        MiniDiscord.Salon.broadcast(salon, "[#{pseudo}] #{msg}\r\n")
-        loop(socket, pseudo, salon)
+        if String.starts_with?(msg, "/") do
+          gerer_commande(socket, pseudo, salon, msg)
+        else
+          MiniDiscord.Salon.broadcast(salon, "[#{pseudo}] #{msg}\r\n")
+          loop(socket, pseudo, salon)
+        end
 
       {:error, :timeout} ->
         loop(socket, pseudo, salon)
@@ -64,6 +71,36 @@ defmodule MiniDiscord.ClientHandler do
     end
   end
 
+  defp gerer_commande(socket, pseudo, salon, commande) do
+    case String.split(commande, " ", parts: 2) do
+      ["/list"] ->
+        :gen_tcp.send(socket, "Salons disponibles : #{salons_dispo()}\r\n")
+        loop(socket, pseudo, salon)
+
+      ["/join", nouveau_salon] ->
+        nouveau_salon = String.trim(nouveau_salon)
+
+        if nouveau_salon == "" do
+          :gen_tcp.send(socket, "Usage: /join <nom_du_salon>\r\n")
+          loop(socket, pseudo, salon)
+        else
+          MiniDiscord.Salon.broadcast(salon, "👋 #{pseudo} a quitté ##{salon}\r\n")
+          MiniDiscord.Salon.quitter(salon, self())
+          rejoindre_salon(socket, pseudo, nouveau_salon)
+        end
+
+      ["/quit"] ->
+        MiniDiscord.Salon.broadcast(salon, "👋 #{pseudo} a quitté ##{salon}\r\n")
+        MiniDiscord.Salon.quitter(salon, self())
+        liberer_pseudo(pseudo)
+        :gen_tcp.close(socket)
+
+      _ ->
+        :gen_tcp.send(socket, "Commande inconnue\r\n")
+        loop(socket, pseudo, salon)
+    end
+  end
+
   defp salons_dispo do
     case MiniDiscord.Salon.lister() do
       [] -> "aucun (tu seras le premier !)"
@@ -73,6 +110,10 @@ defmodule MiniDiscord.ClientHandler do
 
   defp reserver_pseudo(pseudo) do
     :ets.insert(:pseudos, {pseudo, self()})
+  end
+
+  defp pseudo_disponible?(pseudo) do
+    :ets.lookup(:pseudos, pseudo) == []
   end
 
   defp liberer_pseudo(pseudo) do
